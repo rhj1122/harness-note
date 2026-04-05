@@ -353,6 +353,432 @@ describe('HomePage', () => {
 })
 ```
 
+### 类型四：React Hook 测试
+
+Hook 不能直接调用（必须在 React 组件内部使用），所以需要用 `renderHook` 来测试。
+
+`renderHook` 来自 `@testing-library/react`，它会创建一个临时组件来运行你的 Hook。
+
+#### 基础用法
+
+```typescript
+// src/hooks/useCounter.ts
+import { useState, useCallback } from 'react'
+
+export function useCounter(initial = 0) {
+  const [count, setCount] = useState(initial)
+  const increment = useCallback(() => setCount(c => c + 1), [])
+  const decrement = useCallback(() => setCount(c => c - 1), [])
+  return { count, increment, decrement }
+}
+
+// src/hooks/useCounter.test.ts
+import { renderHook, act } from '@testing-library/react'
+import { useCounter } from './useCounter'
+
+describe('useCounter', () => {
+  it('初始值应该为 0', () => {
+    const { result } = renderHook(() => useCounter())
+    //      ^^^^^^ result.current 就是 Hook 的返回值
+    expect(result.current.count).toBe(0)
+  })
+
+  it('increment 应该加 1', () => {
+    const { result } = renderHook(() => useCounter())
+
+    // act() 包裹所有会触发状态更新的操作
+    act(() => {
+      result.current.increment()
+    })
+
+    expect(result.current.count).toBe(1)
+  })
+
+  it('应该支持自定义初始值', () => {
+    const { result } = renderHook(() => useCounter(10))
+    expect(result.current.count).toBe(10)
+  })
+})
+```
+
+#### 关键概念
+
+```
+renderHook(() => useXxx())
+  → 返回 { result }
+  → result.current 就是 Hook 当前的返回值
+  → 每次状态更新后，result.current 会自动更新
+```
+
+#### act() 详解
+
+**act 是什么：** React 要求所有导致状态更新的操作都必须包裹在 `act()` 里。这是 React 的规则，不是 Vitest 的。
+
+**为什么需要 act：** React 的状态更新是异步批处理的。如果不用 `act()` 包裹，你调用了 `increment()`，但 `result.current.count` 可能还没更新，断言就会失败。
+
+```typescript
+// ❌ 不用 act：状态可能还没更新，断言可能失败
+result.current.increment()
+expect(result.current.count).toBe(1)  // 可能还是 0！
+
+// ✅ 用 act：确保状态更新完成后再断言
+act(() => {
+  result.current.increment()
+})
+expect(result.current.count).toBe(1)  // 一定是 1
+```
+
+**什么时候需要 act：**
+
+```typescript
+// 需要 act 的情况：调用了会触发 setState 的操作
+act(() => {
+  result.current.increment()     // Hook 内部调用了 setState
+})
+
+act(() => {
+  result.current.sendMessage('你好')  // Hook 内部调用了 setState
+})
+
+act(() => {
+  fireEvent.click(button)        // 点击按钮触发了组件的 setState
+})
+
+// 不需要 act 的情况：只是读取值，没有触发状态更新
+const { result } = renderHook(() => useCounter())
+expect(result.current.count).toBe(0)  // 只是读取初始值，不需要 act
+```
+
+**act 和 async 的组合：** 如果操作是异步的（比如 API 调用），用 `async act`：
+
+```typescript
+// 同步操作：普通 act
+act(() => {
+  result.current.increment()
+})
+
+// 异步操作：async act
+await act(async () => {
+  await result.current.sendMessage('你好')
+  // sendMessage 内部有 await fetch(...)
+  // 需要等异步操作完成后，状态才会更新
+})
+```
+
+**完整的 act 示例：**
+
+```typescript
+import { renderHook, act } from '@testing-library/react'
+import { useCounter } from './useCounter'
+
+describe('useCounter', () => {
+  it('连续调用 increment 三次应该加 3', () => {
+    const { result } = renderHook(() => useCounter())
+
+    // 可以在一个 act 里做多次操作
+    act(() => {
+      result.current.increment()
+      result.current.increment()
+      result.current.increment()
+    })
+
+    // act 结束后，所有状态更新都已完成
+    expect(result.current.count).toBe(3)
+  })
+
+  it('先加后减应该回到原值', () => {
+    const { result } = renderHook(() => useCounter(5))
+
+    act(() => {
+      result.current.increment()  // 5 → 6
+    })
+    expect(result.current.count).toBe(6)
+
+    act(() => {
+      result.current.decrement()  // 6 → 5
+    })
+    expect(result.current.count).toBe(5)
+  })
+})
+```
+
+---
+
+#### Mock（模拟）详解
+
+**Mock 代码写在哪里：** 全部写在 `xxx.test.ts` 测试文件里，不会影响源代码。
+
+**vi 是什么，需要 import 吗：**
+
+`vi` 是 Vitest 提供的全局工具对象（类似 Jest 的 `jest`）。因为 `vite.config.ts` 里配置了 `globals: true`，所以 `vi` 和 `describe`、`it`、`expect` 一样，是全局可用的，**不需要 import**。
+
+```typescript
+// vite.config.ts 里的这行配置：
+// globals: true
+// 让以下变量全局可用，不需要 import：
+//   describe, it, test, expect, vi, beforeEach, afterEach
+
+// 所以测试文件里可以直接用：
+vi.fn()
+vi.mock(...)
+vi.mocked(...)
+
+// 如果没有配置 globals: true，就需要手动 import：
+// import { vi, describe, it, expect } from 'vitest'
+```
+
+**一个完整的测试文件长什么样：**
+
+```typescript
+// src/hooks/useAIChat.test.ts
+
+// ① import 测试工具（renderHook、act 来自 testing-library，需要 import）
+import { renderHook, act } from '@testing-library/react'
+
+// ② import 被测试的 Hook
+import { useAIChat } from './useAIChat'
+
+// ③ import 需要断言的 mock 函数（用于验证是否被调用）
+import { streamMessage } from '@/api/aiApi'
+
+// ④ Mock 声明（vi 是全局的，不需要 import）
+//    虽然写在 import 后面，但 Vitest 会自动提升到最前面执行
+vi.mock('@/api/aiApi', () => ({
+  streamMessage: vi.fn(),
+  sendMessage: vi.fn(),
+}))
+
+// ⑤ 测试用例
+describe('useAIChat', () => {
+  // ⑥ 每个测试前重置（清除上一个测试的 mock 调用记录）
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('初始状态应该没有消息', () => {
+    // ⑦ 测试代码
+  })
+})
+```
+
+**总结：**
+- `vi`、`describe`、`it`、`expect`、`beforeEach` → 全局可用，不需要 import
+- `renderHook`、`act`、`waitFor` → 来自 `@testing-library/react`，需要 import
+- `render`、`screen`、`fireEvent` → 来自 `@testing-library/react`，需要 import
+- Mock 代码只存在于 `.test.ts` 文件里，不影响源代码
+
+---
+
+**Mock 解决什么问题：**
+
+```
+你的 useAIChat Hook 内部调用了 streamMessage（发 WebSocket 请求）。
+测试时如果真的发请求：
+  - 需要启动 VoltAgent 服务器（麻烦）
+  - 网络不稳定时测试会随机失败（不可靠）
+  - 每次跑测试都要等网络响应（慢）
+
+Mock 的做法：
+  用一个"假的 streamMessage"替代真的
+  这个假函数不发请求，直接返回你指定的数据
+  测试只验证 Hook 的逻辑，不验证网络请求
+```
+
+**vi.fn()：创建假函数**
+
+```typescript
+// 创建一个假函数
+const mockFn = vi.fn()
+
+// 调用它
+mockFn('hello')
+mockFn('world')
+
+// 断言它被调用过
+expect(mockFn).toHaveBeenCalled()           // ✅ 被调用过
+expect(mockFn).toHaveBeenCalledTimes(2)     // ✅ 被调用了 2 次
+expect(mockFn).toHaveBeenCalledWith('hello') // ✅ 第一次调用时传了 'hello'
+```
+
+**vi.fn() 控制返回值：**
+
+```typescript
+// 返回固定值
+const mockAdd = vi.fn().mockReturnValue(42)
+mockAdd(1, 2)  // 返回 42（不管传什么参数）
+
+// 返回 Promise（模拟异步函数）
+const mockFetch = vi.fn().mockResolvedValue({ name: '张三' })
+await mockFetch()  // 返回 Promise.resolve({ name: '张三' })
+
+// 返回 rejected Promise（模拟请求失败）
+const mockFetchError = vi.fn().mockRejectedValue(new Error('网络错误'))
+await mockFetchError()  // 抛出 Error('网络错误')
+
+// 自定义实现（完全控制行为）
+const mockCalc = vi.fn().mockImplementation((a, b) => a * b)
+mockCalc(3, 4)  // 返回 12
+```
+
+**vi.mock()：替换整个模块**
+
+这是最常用的 Mock 方式——把一个模块里的所有导出替换成假的。
+
+```typescript
+// 假设 src/api/aiApi.ts 导出了两个函数：
+// export async function sendMessage(messages) { ... }
+// export async function* streamMessage(messages) { ... }
+
+// 在测试文件顶部，用 vi.mock 替换整个模块
+vi.mock('@/api/aiApi', () => ({
+  sendMessage: vi.fn().mockResolvedValue({
+    id: 'msg-1',
+    role: 'assistant',
+    content: '你好！',
+    timestamp: Date.now(),
+  }),
+  streamMessage: vi.fn(),
+}))
+
+// 现在测试文件里 import 的 sendMessage 和 streamMessage 都是假的
+// useAIChat 内部调用 streamMessage 时，不会真的发 WebSocket 请求
+```
+
+**vi.mock 的执行时机：**
+
+```typescript
+// vi.mock 会被 Vitest 自动提升到文件顶部执行
+// 所以不管你写在哪里，它都会在所有 import 之前生效
+
+import { useAIChat } from './useAIChat'  // 这里 import 时，aiApi 已经被 mock 了
+
+vi.mock('@/api/aiApi', () => ({          // 虽然写在 import 后面
+  streamMessage: vi.fn(),                // 但实际上在 import 之前就执行了
+}))
+```
+
+**在测试中获取和操作 mock 函数：**
+
+```typescript
+import { streamMessage } from '@/api/aiApi'
+
+vi.mock('@/api/aiApi', () => ({
+  streamMessage: vi.fn(),
+}))
+
+describe('useAIChat', () => {
+  beforeEach(() => {
+    // 每个测试前重置 mock（清除调用记录和返回值）
+    vi.clearAllMocks()
+  })
+
+  it('sendMessage 应该调用 streamMessage', async () => {
+    // 为这个测试指定 mock 的行为
+    // vi.mocked() 把 streamMessage 的类型转为 Mock 类型，方便调用 mock 方法
+    vi.mocked(streamMessage).mockImplementation(async function* () {
+      yield '你'
+      yield '好'
+      yield '！'
+    })
+
+    const { result } = renderHook(() => useAIChat())
+
+    await act(async () => {
+      await result.current.sendMessage('你好')
+    })
+
+    // 验证 streamMessage 被调用了
+    expect(streamMessage).toHaveBeenCalled()
+
+    // 验证消息列表更新了
+    expect(result.current.messages.length).toBeGreaterThan(0)
+  })
+
+  it('streamMessage 失败时应该显示错误消息', async () => {
+    // 模拟请求失败
+    vi.mocked(streamMessage).mockImplementation(async function* () {
+      throw new Error('连接失败')
+    })
+
+    const { result } = renderHook(() => useAIChat())
+
+    await act(async () => {
+      await result.current.sendMessage('你好')
+    })
+
+    // 验证错误被处理了（不是直接崩溃）
+    const lastMessage = result.current.messages[result.current.messages.length - 1]
+    expect(lastMessage.content).toContain('错误')
+  })
+})
+```
+
+**Mock 的常用操作速查：**
+
+```typescript
+// 创建
+vi.fn()                                    // 创建假函数
+vi.mock('模块路径', () => ({ ... }))        // 替换整个模块
+vi.mocked(realFn)                          // 获取已 mock 的函数（带类型）
+
+// 控制返回值
+.mockReturnValue(value)                    // 同步返回
+.mockResolvedValue(value)                  // 异步返回（Promise.resolve）
+.mockRejectedValue(error)                 // 异步失败（Promise.reject）
+.mockImplementation(fn)                    // 自定义实现
+
+// 断言
+expect(mockFn).toHaveBeenCalled()          // 被调用过
+expect(mockFn).toHaveBeenCalledTimes(n)    // 被调用了 n 次
+expect(mockFn).toHaveBeenCalledWith(arg)   // 被调用时传了 arg
+
+// 重置
+vi.clearAllMocks()                         // 清除所有 mock 的调用记录
+vi.resetAllMocks()                         // 清除调用记录 + 重置返回值
+vi.restoreAllMocks()                       // 恢复原始实现
+```
+
+#### 测试需要 Provider 的 Hook
+
+如果 Hook 内部用了 Context（比如 `useAIProvider()`），需要用 `wrapper` 提供 Provider：
+
+```typescript
+import { renderHook } from '@testing-library/react'
+import { AIProvider } from '@/providers/AIProvider'
+import { useAIChat } from './useAIChat'
+
+describe('useAIChat', () => {
+  it('初始状态应该没有消息', () => {
+    const { result } = renderHook(() => useAIChat(), {
+      wrapper: AIProvider,
+      // wrapper 会把 Hook 包裹在 <AIProvider> 里面
+      // 这样 Hook 内部的 useAIProvider() 就能正常工作
+    })
+
+    expect(result.current.messages).toHaveLength(0)
+    expect(result.current.isStreaming).toBe(false)
+  })
+})
+```
+
+如果需要多个 Provider，可以组合：
+
+```typescript
+function AllProviders({ children }: { children: React.ReactNode }) {
+  return (
+    <BrowserRouter>
+      <AIProvider>
+        {children}
+      </AIProvider>
+    </BrowserRouter>
+  )
+}
+
+const { result } = renderHook(() => useAIChat(), {
+  wrapper: AllProviders,
+})
+```
+
 ---
 
 ## 八、运行测试的方式
