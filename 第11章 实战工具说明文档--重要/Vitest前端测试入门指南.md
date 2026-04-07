@@ -633,7 +633,7 @@ mockCalc(3, 4)  // 返回 12
 vi.mock('@/api/aiApi', () => ({
   sendMessage: vi.fn().mockResolvedValue({
     id: 'msg-1',
-    role: 'assistant',
+    role: 'agent',
     content: '你好！',
     timestamp: Date.now(),
   }),
